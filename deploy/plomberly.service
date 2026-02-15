@@ -1,0 +1,12 @@
+[Unit]
+Description=Plomberly Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/plombery
+ExecStart=/home/ubuntu/plombery/venv/bin/python /home/ubuntu/plombery/src/app.py
+
+[Install]
+WantedBy=multi-user.target
