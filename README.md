@@ -45,15 +45,16 @@ To explore the job market trends and insights, visit the Jobs Analyzer dashboard
 - Raw CSV dumps are kept under `saved_data/allsopp/<segment>/page_<n>.csv`, while the merged `allsopp_listings.json` (with a `listing_category` flag of `sales` or `lettings`) is written locally and uploaded to `data/allsopp_listings.json` in Cloudflare R2 using the `[cloudflare]` `PROP_BUCKET` (falling back to `BUCKET`) credentials.
 - Run the full pipeline with `plombery run allsopp_pipeline` or rely on the scheduled trigger at 05:30 Asia/Dubai.
 
+### 99acres Property Scraper Pipeline
+
+- The 99acres property scraper lives in `src/plombery/acres99_crs.py`. It mirrors the Allsopp pipeline but targets 99acres search pages for Indian real estate listings.
+- Configure the behaviour in the `[acres99]` section of `src/plombery/config/config.ini` (listing URL template, page count, back-off timings, and ES index name). Supports both buy and rent modes via `listing_url`/`pages`/`es_index` and `rent_listing_url`/`rent_pages`/`rent_es_index` respectively.
+- The scraper extracts property details from __NEXT_DATA__ payloads with fallback to JSON-LD structured data, normalizes Indian price formats (Lakh/Crore), handles multiple property field naming conventions, and supports price-per-sqft calculations.
+- Each mode short-circuits pagination when it encounters an ID already present in the respective Elasticsearch index, avoiding redundant detail fetches when older properties resurface (controlled by `stop_on_existing`).
+- Raw CSV dumps are kept under `saved_data/99acres/<category>/page_<n>.csv`, while the merged `acres99_listings.json` (with a `listing_category` flag of `buy` or `rent`) is written locally and uploaded to Cloudflare R2.
+- Run the full pipeline with `plombery run acres99_pipeline` or rely on the scheduled trigger (05:30 Asia/Kolkata).
+
 ### DLD Open Data Pipeline
-
-- The Dubai Land Department open-data scraper lives in `src/plombery/dld_open_data.py`. It now scrapes the public “Real Estate Data” webpage (Next.js) instead of the legacy CKAN API and still supports the **Transactions**, **Rents**, **Projects**, **Valuations**, **Land**, **Building**, **Unit**, **Broker**, and **Developer** tabs.
-- Configure tab slugs, primary date columns, and Elasticsearch indices inside the `[dld_open_data]` section of `src/plombery/config/config.ini`. The default `page_url` points at `https://dubailand.gov.ae/en/open-data/real-estate-data/`, while `lookback_days` and optional per-dataset `*_buffer_days` control incremental windows when deriving the `FromDate` filters.
-- The scraper persists the most recent date per dataset in `saved_data/dld_open_data/state.json`, subtracting a small buffer (default three days) on every run to guard against late-arriving records. Artefacts are stored under `saved_data/dld_open_data/<dataset>/`, and records are indexed with `_dataset`, `_source_url`, and `_extracted_at_iso` metadata for downstream consumers.
-- Run `plombery run dld_open_data_pipeline` to ingest immediately or rely on the built-in trigger (06:00 Asia/Dubai). The scraper now automatically retries when the website serves a temporary reCAPTCHA challenge ("I'm not a robot"), backing off between attempts before ultimately raising a `RecaptchaBlockedError` if the block persists.
-- To minimise the chance of challenges in the first place, the HTTP client now relies on [`curl_cffi`](https://github.com/yifeikong/curl_cffi) impersonation profiles with HTTP/2 enabled and realistic `sec-ch-*` headers/user agents. This "ultra-modern" fingerprint keeps the pipeline aligned with how a real Chrome 124 browser negotiates TLS.
-
-### Testing
 
 - Run `python -m pytest tests/test_crswtch_parser.py` and `python -m pytest tests/test_allsopp_parser.py` (or `python -m unittest`) to validate the vehicle and property parsers against the embedded fixtures under `tests/fixtures`.
 - UI helpers leveraged by the Streamlit dashboards are covered in `tests/test_streamlit_ui.py`; run `python -m pytest tests/test_streamlit_ui.py` to confirm filtering logic stays intact.

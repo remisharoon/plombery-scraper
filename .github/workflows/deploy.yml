@@ -1,0 +1,142 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    types: [closed]
+    branches: [main, master]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  SSH_HOST: ${{ secrets.SSH_HOST }}
+  SSH_USER: ${{ secrets.SSH_USER }}
+  SSH_PORT: ${{ secrets.SSH_PORT }}
+  REMOTE_PATH: ${{ secrets.REMOTE_PATH }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'release' ||
+      (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
+
+      - name: Verify SSH connection
+        run: |
+          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "echo 'SSH connection successful'"
+
+      - name: Detect Python version on remote
+        id: python-version
+        run: |
+          PYTHON_VERSION=$(ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "python3 --version" 2>&1)
+          echo "version=$PYTHON_VERSION" >> $GITHUB_OUTPUT
+          echo "Python version on remote: $PYTHON_VERSION"
+
+      - name: Check if requirements.txt changed
+        id: requirements-check
+        run: |
+          if [ "${{ github.event_name }}" == "push" ]; then
+            git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | grep -q "^requirements.txt$" && echo "changed=true" >> $GITHUB_OUTPUT || echo "changed=false" >> $GITHUB_OUTPUT
+            echo "requirements.txt changed: ${{ steps.requirements-check.outputs.changed }}"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Forcing dependency install (not a push event)"
+          fi
+
+      - name: Sync files to server
+        run: |
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT" \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.gitignore' \
+            --exclude='tests/' \
+            --exclude='data/' \
+            --exclude='saved_data/' \
+            --exclude='saved_pages/' \
+            --exclude='csv_downloads/' \
+            --exclude='__pycache__/' \
+            --exclude='*.pyc' \
+            --exclude='*.pyo' \
+            --exclude='*.pyd' \
+            --exclude='*.egg-info/' \
+            --exclude='dist/' \
+            --exclude='build/' \
+            --exclude='.pytest_cache/' \
+            --exclude='.mypy_cache/' \
+            --exclude='.DS_Store' \
+            --exclude='venv/' \
+            --exclude='*.db' \
+            --exclude='*.json' \
+            --exclude='src/__pycache__/' \
+            --exclude='src/csv_downloads/' \
+            --exclude='src/plombery/config/config.ini' \
+            ./ $SSH_USER@$SSH_HOST:$REMOTE_PATH/
+
+      - name: Verify file sync
+        run: |
+          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "cd $REMOTE_PATH && ls -la src/ | head -20"
+
+      - name: Install dependencies (if requirements.txt changed)
+        if: steps.requirements-check.outputs.changed == 'true'
+        run: |
+          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
+            "cd $REMOTE_PATH && \
+             if [ -d venv ]; then \
+               source venv/bin/activate && \
+               echo 'Upgrading pip...' && \
+               pip install --upgrade pip && \
+               echo 'Installing dependencies...' && \
+               pip install -r requirements.txt && \
+               echo 'Dependencies installed successfully'; \
+             else \
+               echo 'ERROR: Virtual environment not found at $REMOTE_PATH/venv'; \
+               exit 1; \
+             fi"
+
+      - name: Verify Python environment
+        run: |
+          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
+            "cd $REMOTE_PATH && \
+             source venv/bin/activate && \
+             echo 'Python: \$(python3 --version)' && \
+             echo 'Pip: \$(pip --version)' && \
+             echo 'Installed packages: \$(pip list | wc -l)'"
+
+      - name: Check plombery status
+        run: |
+          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
+            "cd $REMOTE_PATH && \
+             source venv/bin/activate && \
+             echo 'Plombery version:' && \
+             plombery --version || echo 'Plombery not found in PATH'"
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Server:** \`$SSH_USER@$SSH_HOST:$REMOTE_PATH\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Python Version:** ${{ steps.python-version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Dependencies Updated:** ${{ steps.requirements-check.outputs.changed }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Files Synced:** Completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment successful!" >> $GITHUB_STEP_SUMMARY
