@@ -26,6 +26,7 @@ To explore the job market trends and insights, visit the Jobs Analyzer dashboard
 5. Provision an Elasticsearch cluster (or use an existing one) and set `host`, `username`, `password`, and `jobs_index` in `src/plombery/config/config.ini`.
 6. Set up a Cloudflare R2 bucket (default: `me-data-jobs`) and update the credentials plus `JOBS_BUCKET`/`JOBS_EXPORT_KEY` values in `src/plombery/config/config.ini`.
 7. Deploy the Streamlit dashboard to Streamlit Cloud, using the provided configuration files.
+8. Set up the Plombery service using the systemd service file at `deploy/plomberly.service` for automated pipeline execution.
 
 ### Crswtch Scraper Pipeline
 
@@ -65,6 +66,20 @@ To explore the job market trends and insights, visit the Jobs Analyzer dashboard
 - The pipeline writes a `jobs.json` snapshot to Cloudflare R2 using the bucket/key defined in `JOBS_BUCKET` and `JOBS_EXPORT_KEY`.
 - The default public URL is `https://6d9a56e137a3328cc52e48656dd30d91.r2.cloudflarestorage.com/me-data-jobs/jobs.json`.
 - Update `JOBS_CACHE_CONTROL` if you need different CDN caching behaviour.
+
+### Systemd Service
+
+- The `deploy/plomberly.service` file provides a systemd service definition for running Plombery on Oracle Cloud.
+- Install the service:
+  ```bash
+  sudo cp deploy/plomberly.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable plomberly.service
+  sudo systemctl start plomberly.service
+  ```
+- Check service status: `systemctl status plomberly.service`
+- View logs: `journalctl -u plomberly.service -f`
+- Restart service: `sudo systemctl restart plomberly.service`
 
 ## Contributions
 

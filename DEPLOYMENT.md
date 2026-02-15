@@ -143,7 +143,30 @@ cat src/plombery/config/config.ini
 
 **Note:** The config file should be excluded from rsync to preserve server-specific settings.
 
-## Step 5: Test the Deployment
+## Step 5: Install Systemd Service
+
+Copy the systemd service file to the server and enable it:
+
+```bash
+# Copy the service file to the server
+scp deploy/plomberly.service ubuntu@193.123.94.116:/tmp/
+
+# SSH into the server
+ssh ubuntu@193.123.94.116
+
+# Install the service
+sudo cp /tmp/plomberly.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable plomberly.service
+sudo systemctl start plomberly.service
+
+# Verify the service is running
+systemctl status plomberly.service
+```
+
+The service will automatically start on boot and run Plombery as a persistent process.
+
+## Step 6: Test the Deployment
 
 ### Manual Trigger
 
@@ -154,7 +177,7 @@ cat src/plombery/config/config.ini
 
 ### Verify Plombery Service
 
-After deployment, verify the Plombery service is running:
+After deployment, verify the Plombery service is running. The service is defined in `deploy/plomberly.service` and should be installed on the server.
 
 ```bash
 ssh ubuntu@193.123.94.116 "systemctl status plomberly.service"
