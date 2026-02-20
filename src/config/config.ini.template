@@ -1,0 +1,7 @@
+[PostgresDB]
+connection_string = postgresql://********:*********@ep-****-****-****-pooler.eu-central-1.aws.neon.tech/*****?sslmode=require
+
+[GeminiPro]
+API_KEY = **********************************
+
+
