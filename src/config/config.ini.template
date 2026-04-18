@@ -1,7 +1,33 @@
 [PostgresDB]
-connection_string = postgresql://********:*********@ep-****-****-****-pooler.eu-central-1.aws.neon.tech/*****?sslmode=require
+connection_string = postgresql://user:password@host/dbname?sslmode=require
 
 [GeminiPro]
-API_KEY = **********************************
+API_KEY_RH = your-gemini-api-key-1
+API_KEY_RHA = your-gemini-api-key-2
 
+[openrouter]
+API_KEY = your-openrouter-api-key
 
+[elasticsearch]
+host = https://your-es-host:9200
+username = elastic
+password = your-es-password
+index = cars_listings
+jobs_index = jobs_analyzer_jobs
+
+[cloudflare]
+ACCOUNT_ID = your-cloudflare-account-id
+R2_ENDPOINT = https://your-account-id.r2.cloudflarestorage.com
+ACCESS_KEY_ID = your-r2-access-key-id
+SECRET_ACCESS_KEY = your-r2-secret-access-key
+BUCKET = your-r2-bucket
+JOBS_BUCKET = me-data-jobs
+JOBS_EXPORT_KEY = jobs.json
+JOBS_CACHE_CONTROL = public, max-age=300
+
+[Sendgrid]
+Username = your-smtp-username
+Password = your-smtp-password
+
+[core]
+base_url = https://example.com/api/listings?page={0}&offset={1}

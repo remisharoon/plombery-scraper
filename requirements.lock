@@ -87,6 +87,6 @@ tzlocal==5.2
 urllib3==1.26.19
 uvicorn==0.40.0
 w3lib==2.2.1
-websockets==11.0.3
+websockets
 wsproto==1.2.0
 zipp==3.19.2
