@@ -12,7 +12,6 @@ def read_config():
     filename = os.path.join(script_dir, 'config.ini')
     config = configparser.ConfigParser()
     config.read(filename)
-    print(config.sections())
     return config
 
 if __name__ == '__main__':

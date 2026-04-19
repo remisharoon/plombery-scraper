@@ -46,10 +46,20 @@ def es_client():
         max_retries=3,
         retry_on_timeout=True,
     )
-    print(es.info())
+    try:
+        info = es.info()
+        logger.info("Connected to ES cluster=%s", info.get("cluster_name", "unknown"))
+    except Exception as exc:
+        logger.warning("Failed to fetch ES info: %s", exc)
     return es
 
-es = es_client()
+_es: Elasticsearch | None = None
+
+def _get_es() -> Elasticsearch:
+    global _es
+    if _es is None:
+        _es = es_client()
+    return _es
 
 
 
@@ -330,8 +340,10 @@ mapping = {
     }
 }
 
-if not es.indices.exists(index=ES_INDEX):
-    es.indices.create(index=ES_INDEX, body=mapping)
+def _ensure_index():
+    es = _get_es()
+    if not es.indices.exists(index=ES_INDEX):
+        es.indices.create(index=ES_INDEX, body=mapping)
 
 
 class ScrapingUtils:
@@ -431,6 +443,8 @@ def load_soup(filepath: str) -> BeautifulSoup:
 
 @task
 async def dbzl_car_data():
+    _ensure_index()
+    es = _get_es()
     for page_n in range(1,20):
         url = build_url(page_n)
         # url = base_url

@@ -604,7 +604,7 @@ def save_to_db(table_name, df: pd.DataFrame):
         logger.info("No rows to persist to table %s", table_name)
         return
 
-    engine = create_engine(connection_string)
+    engine = create_engine(connection_string, connect_args={"connect_timeout": 10})
     try:
         df.to_sql(name=table_name, con=engine, if_exists='append', index=False)
         logger.info("Inserted %d records into %s", len(df), table_name)
@@ -612,7 +612,7 @@ def save_to_db(table_name, df: pd.DataFrame):
         engine.dispose()
 
 def query_to_df(query) -> pd.DataFrame:
-    engine = create_engine(connection_string)
+    engine = create_engine(connection_string, connect_args={"connect_timeout": 10})
     df = pd.read_sql_query(query, con=engine)
     engine.dispose()
     return df

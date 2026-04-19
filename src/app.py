@@ -6,5 +6,13 @@ import jobs_scrape_pipeline, jobs_alerts_pipeline, standardization_pipeline, dub
 
 if __name__ == "__main__":
     import uvicorn
+    import errno
 
-    uvicorn.run("plombery:get_app", reload=True, factory=True, reload_dirs="..", port=8080, host="0.0.0.0")
+    try:
+        uvicorn.run("plombery:get_app", reload=True, factory=True, reload_dirs="..", port=8080, host="0.0.0.0")
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE:
+            print(f"ERROR: Port 8080 is already in use. Kill the existing process or change the port.")
+            print("  Try: lsof -i :8080  or  fuser -k 8080/tcp")
+        else:
+            raise

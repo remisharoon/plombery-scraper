@@ -101,7 +101,7 @@ def send_alert_email(connection, server, email, alerts):
 @task
 async def send_alert_emails():
     # Database connection string
-    engine = create_engine(connection_string)
+    engine = create_engine(connection_string, connect_args={"connect_timeout": 10})
     connection = engine.connect()
 
     # Connect to Gmail's SMTP server

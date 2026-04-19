@@ -24,40 +24,41 @@ import smtplib
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from config import read_config
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _get_engine():
     neondb_config = read_config()['PostgresDB']
     connection_string = neondb_config['connection_string']
-    return create_engine(connection_string)
+    return create_engine(connection_string, connect_args={"connect_timeout": 10})
 
 
 
 def execute_query(query):
     engine = _get_engine()
     connection = engine.connect()
-    transaction = connection.begin()  # Start a transaction
+    transaction = connection.begin()
 
     try:
+        if isinstance(query, str):
+            query = text(query)
         results = connection.execute(query)
-        transaction.commit()  # Commit the transaction if no errors occur
+        transaction.commit()
         if results.returns_rows:
-            return results.fetchall()  # Fetch results if there are any
+            return results.fetchall()
         else:
             return None
     except SQLAlchemyError as e:
-        print(f"Database error: {e}")
-        transaction.rollback()  # Roll back the transaction in case of an error
+        logger.warning("Database error: %s", e)
+        transaction.rollback()
         return None
     except Exception as e:
-        print(f"General error: {e}")
+        logger.warning("General error: %s", e)
         return None
     finally:
         connection.close()
         engine.dispose()
-
-# Example usage
-query = "INSERT INTO ja_country_names_std_mapping (source_value, target_value) VALUES ('AZ, AE', 'Dubai')"
-execute_query(query)
 
 

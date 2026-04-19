@@ -5,7 +5,7 @@ from src.config import read_config
 def get_neon_engine():
     neondb_config = read_config()['PostgresDB']
     connection_string = neondb_config['connection_string']
-    return create_engine(connection_string)
+    return create_engine(connection_string, connect_args={"connect_timeout": 10})
 
 
 try:
