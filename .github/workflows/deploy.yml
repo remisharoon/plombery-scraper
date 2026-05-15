@@ -38,16 +38,20 @@ jobs:
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
+          if [ -n "$SSH_HOST" ]; then
+            ssh-keyscan -H -p ${SSH_PORT:-22} "$SSH_HOST" >> ~/.ssh/known_hosts
+          else
+            echo "WARNING: SSH_HOST is not set, skipping keyscan (StrictHostKeyChecking will be disabled)"
+          fi
 
       - name: Verify SSH connection
         run: |
-          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "echo 'SSH connection successful'"
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "echo 'SSH connection successful'"
 
       - name: Detect Python version on remote
         id: python-version
         run: |
-          PYTHON_VERSION=$(ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "python3 --version" 2>&1)
+          PYTHON_VERSION=$(ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "python3 --version" 2>&1)
           echo "version=$PYTHON_VERSION" >> $GITHUB_OUTPUT
           echo "Python version on remote: $PYTHON_VERSION"
 
@@ -65,7 +69,7 @@ jobs:
       - name: Sync files to server
         run: |
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT" \
+            -e "ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT" \
             --exclude='.git/' \
             --exclude='.github/' \
             --exclude='.gitignore' \
@@ -94,12 +98,12 @@ jobs:
 
       - name: Verify file sync
         run: |
-          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "cd $REMOTE_PATH && ls -la src/ | head -20"
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST "cd $REMOTE_PATH && ls -la src/ | head -20"
 
       - name: Install dependencies (if requirements.txt changed)
         if: steps.requirements-check.outputs.changed == 'true'
         run: |
-          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
             "cd $REMOTE_PATH && \
              if [ -d venv ]; then \
                source venv/bin/activate && \
@@ -115,7 +119,7 @@ jobs:
 
       - name: Verify Python environment
         run: |
-          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
             "cd $REMOTE_PATH && \
              source venv/bin/activate && \
              echo 'Python: \$(python3 --version)' && \
@@ -124,7 +128,7 @@ jobs:
 
       - name: Check plombery status
         run: |
-          ssh -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key -p $SSH_PORT $SSH_USER@$SSH_HOST \
             "cd $REMOTE_PATH && \
              source venv/bin/activate && \
              echo 'Plombery version:' && \

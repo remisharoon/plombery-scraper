@@ -123,7 +123,23 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) handles deployment:
 3. Installs dependencies if `requirements.txt` changed.
 4. The app runs as a systemd service (`plomberly.service`).
 
-Required GitHub secrets: `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `REMOTE_PATH`, `SSH_PRIVATE_KEY`.
+#### Setting up GitHub secrets
+
+Go to your repository **Settings → Secrets and variables → Actions** and add these secrets:
+
+| Secret | How to get it |
+|---|---|
+| `SSH_PRIVATE_KEY` | Generate a key pair locally: `ssh-keygen -t ed25519 -C "deploy"`. Copy the **private key** contents (`cat ~/.ssh/id_ed25519`). |
+| `SSH_HOST` | The **public IP** or hostname of your Oracle Cloud instance. Find it in the Oracle Cloud Console under **Compute → Instances → [your instance]**, or run `ssh <user>@<public-ip>` to test. You can also get it via OCI CLI: `oci compute instance list --compartment-id <ocid> --query "data[0].\"public-ips\"[0]"`. |
+| `SSH_USER` | The SSH username for your instance. For Oracle Cloud Ubuntu images this is typically `ubuntu`. |
+| `SSH_PORT` | The SSH port (default is `22`). Check your instance's security list / NSG if you customized it. |
+| `REMOTE_PATH` | The absolute path on the remote server where the app lives, e.g. `/home/ubuntu/plombery`. |
+
+After generating the key pair, add the **public key** to the remote server's `~/.ssh/authorized_keys`:
+
+```bash
+ssh-copy-id -i ~/.ssh/id_ed25519.pub ubuntu@<SSH_HOST>
+```
 
 The systemd service runs:
 
