@@ -1,4 +1,4 @@
-import jobs_scrape_pipeline, jobs_alerts_pipeline, standardization_pipeline, dubzl_crs, crswth_crs, allsopp_crs
+import jobs_scrape_pipeline, jobs_alerts_pipeline, standardization_pipeline, dubzl_crs, crswth_crs, allsopp_crs, kochi_launches_pipeline
 # import jobs_scrape_pipeline, jobs_alerts_pipeline, standardization_pipeline, dubzl_crs, crswth_crs
 # from plombery import get_app  # noqa: F401
 
