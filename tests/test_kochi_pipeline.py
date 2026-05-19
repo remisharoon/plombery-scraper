@@ -10,9 +10,9 @@ from kochi_launches_pipeline import (
     standardize_and_index,
     ai_classify_builders,
     normalize_project_record,
-    parse_magicbricks_listing,
-    parse_housing_listing,
-    parse_google_serp,
+    parse_duckduckgo_serp,
+    parse_prestige_kochi_projects,
+    parse_signature_dwellings,
     parse_project_detail_page,
     InputParams,
 )
@@ -29,30 +29,27 @@ def run_async(coro):
 class TestDiscoverTask:
     @patch("kochi_launches_pipeline._fetch")
     @patch("kochi_launches_pipeline._build_http_client")
-    def test_discovers_from_portals(self, mock_client_builder, mock_fetch, magicbricks_html, housing_html, google_serp_html):
+    def test_discovers_from_duckduckgo(self, mock_client_builder, mock_fetch, google_serp_html):
         mock_session = MagicMock()
         mock_client_builder.return_value = (mock_session, False)
 
-        call_count = [0]
         def side_effect(session, url, **kwargs):
-            call_count[0] += 1
-            if "google" in url:
+            if "duckduckgo" in url:
                 return google_serp_html
-            if "magicbricks" in url:
-                return magicbricks_html
-            if "housing" in url:
-                return housing_html
+            # Level 2: listing page with project links
+            if "squareyards" in url or "magicbricks" in url or "housing" in url:
+                return '<html><body><a href="https://example.com/project-kochi-1">Kochi Project</a></body></html>'
             return "<html><body></body></html>"
 
         mock_fetch.side_effect = side_effect
 
         with patch("kochi_launches_pipeline.SETTINGS") as mock_settings:
-            mock_settings.google_queries = ["pre launch apartments kochi"]
-            mock_settings.google_pages = 1
-            mock_settings.magicbricks_url = "https://www.magicbricks.com/new-projects-kochi-pppfs"
-            mock_settings.housing_url = "https://www.housing.com/new-projects/kochi"
-            mock_settings.acres99_url = "https://www.99acres.com/new-projects-in-kochi"
-            mock_settings.commonfloor_url = "https://www.commonfloor.com/kochi-property/new-projects"
+            mock_settings.duckduckgo_queries = ["pre launch apartments kochi"]
+            mock_settings.duckduckgo_pages = 1
+            mock_settings.signature_dwellings_url = ""
+            mock_settings.prestige_prelaunch_kochi_url = ""
+            mock_settings.realestateindia_url = ""
+            mock_settings.realestateindia_localities = []
             mock_settings.pages = 1
             mock_settings.min_delay = 0.01
             mock_settings.max_delay = 0.02
@@ -63,17 +60,66 @@ class TestDiscoverTask:
 
     @patch("kochi_launches_pipeline._fetch")
     @patch("kochi_launches_pipeline._build_http_client")
+    def test_discovers_from_prestige_prelaunch(self, mock_client_builder, mock_fetch, prestige_prelaunch_html):
+        mock_session = MagicMock()
+        mock_client_builder.return_value = (mock_session, False)
+        mock_fetch.return_value = prestige_prelaunch_html
+
+        with patch("kochi_launches_pipeline.SETTINGS") as mock_settings:
+            mock_settings.duckduckgo_queries = []
+            mock_settings.duckduckgo_pages = 0
+            mock_settings.signature_dwellings_url = ""
+            mock_settings.prestige_prelaunch_kochi_url = "https://prestigeprelaunchprojects.com/kochi/"
+            mock_settings.realestateindia_url = ""
+            mock_settings.realestateindia_localities = []
+            mock_settings.pages = 1
+            mock_settings.min_delay = 0.01
+            mock_settings.max_delay = 0.02
+
+            result = run_async(discover_kochi_projects.run(params=InputParams()))
+            assert isinstance(result, list)
+            assert len(result) >= 1
+            names = [p.get("project_name", "") for p in result]
+            assert any("Prestige" in n for n in names)
+
+    @patch("kochi_launches_pipeline._fetch")
+    @patch("kochi_launches_pipeline._build_http_client")
+    def test_discovers_from_signature_dwellings(self, mock_client_builder, mock_fetch, signature_dwellings_html):
+        mock_session = MagicMock()
+        mock_client_builder.return_value = (mock_session, False)
+        mock_fetch.return_value = signature_dwellings_html
+
+        with patch("kochi_launches_pipeline.SETTINGS") as mock_settings:
+            mock_settings.duckduckgo_queries = []
+            mock_settings.duckduckgo_pages = 0
+            mock_settings.signature_dwellings_url = "https://signaturedwellingsprojects.com/kochi/"
+            mock_settings.prestige_prelaunch_kochi_url = ""
+            mock_settings.realestateindia_url = ""
+            mock_settings.realestateindia_localities = []
+            mock_settings.pages = 1
+            mock_settings.min_delay = 0.01
+            mock_settings.max_delay = 0.02
+
+            result = run_async(discover_kochi_projects.run(params=InputParams()))
+            assert isinstance(result, list)
+            assert len(result) >= 2
+            names = [p.get("project_name", "") for p in result]
+            assert any("Signature" in n for n in names)
+
+    @patch("kochi_launches_pipeline._fetch")
+    @patch("kochi_launches_pipeline._build_http_client")
     def test_handles_empty_results(self, mock_client_builder, mock_fetch, empty_html):
         mock_session = MagicMock()
         mock_client_builder.return_value = (mock_session, False)
         mock_fetch.return_value = empty_html
 
         with patch("kochi_launches_pipeline.SETTINGS") as mock_settings:
-            mock_settings.google_queries = []
-            mock_settings.magicbricks_url = ""
-            mock_settings.housing_url = ""
-            mock_settings.acres99_url = ""
-            mock_settings.commonfloor_url = ""
+            mock_settings.duckduckgo_queries = []
+            mock_settings.duckduckgo_pages = 0
+            mock_settings.signature_dwellings_url = ""
+            mock_settings.prestige_prelaunch_kochi_url = ""
+            mock_settings.realestateindia_url = ""
+            mock_settings.realestateindia_localities = []
             mock_settings.pages = 0
             mock_settings.min_delay = 0.01
             mock_settings.max_delay = 0.02
@@ -172,27 +218,28 @@ class TestClassifyBuildersTask:
 
 
 class TestFullPipelineIntegration:
+    @patch("kochi_launches_pipeline.ai_extract_project")
     @patch("kochi_launches_pipeline._fetch")
     @patch("kochi_launches_pipeline._build_http_client")
-    def test_discover_to_index_chain(self, mock_client_builder, mock_fetch, magicbricks_html, project_detail_html, mock_es_client):
+    def test_discover_to_index_chain(self, mock_client_builder, mock_fetch, mock_ai_extract, signature_dwellings_html, project_detail_html, mock_es_client):
         mock_session = MagicMock()
         mock_client_builder.return_value = (mock_session, False)
+        mock_ai_extract.return_value = {}
 
         def side_effect(session, url, **kwargs):
-            if "magicbricks" in url and "project" not in url.lower():
-                return magicbricks_html
-            if "detail" in url.lower() or "prestige" in url.lower():
-                return project_detail_html
-            return magicbricks_html
+            if "signature" in url.lower():
+                return signature_dwellings_html
+            return project_detail_html
 
         mock_fetch.side_effect = side_effect
 
         with patch("kochi_launches_pipeline.SETTINGS") as mock_settings:
-            mock_settings.google_queries = []
-            mock_settings.magicbricks_url = "https://www.magicbricks.com/new-projects-kochi-pppfs"
-            mock_settings.housing_url = ""
-            mock_settings.acres99_url = ""
-            mock_settings.commonfloor_url = ""
+            mock_settings.duckduckgo_queries = []
+            mock_settings.duckduckgo_pages = 0
+            mock_settings.signature_dwellings_url = "https://signaturedwellingsprojects.com/kochi/"
+            mock_settings.prestige_prelaunch_kochi_url = ""
+            mock_settings.realestateindia_url = ""
+            mock_settings.realestateindia_localities = []
             mock_settings.pages = 1
             mock_settings.min_delay = 0.01
             mock_settings.max_delay = 0.02
@@ -221,7 +268,7 @@ class TestFullPipelineIntegration:
             "builder_name": "Same Builder",
             "price_min": 5000000,
             "amenities": ["Pool"],
-            "source": "magicbricks",
+            "source": "duckduckgo",
         })
         record2 = normalize_project_record({
             "project_name": "Same Project",
@@ -229,7 +276,7 @@ class TestFullPipelineIntegration:
             "price_min": 5000000,
             "price_max": 8000000,
             "amenities": ["Pool", "Gym"],
-            "source": "housing",
+            "source": "prestige_prelaunch",
         })
 
         with patch("kochi_launches_pipeline.es_client", return_value=mock_es_client):

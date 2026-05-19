@@ -2,7 +2,12 @@
 
 Discovers, enriches, standardizes and indexes pre-launch and new-launch
 residential projects (apartments, villas) in Kochi, Kerala from multiple
-property portals and Google search, into Elasticsearch.
+property portals and search engines, into Elasticsearch.
+
+Two-level discovery:
+  Level 1: Find listing pages via DuckDuckGo + portal homepages
+  Level 2: Visit each listing page to extract individual project URLs
+  Level 3: Visit each project detail page to extract structured data
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, unquote, urljoin
 
 import numpy as np
 import pandas as pd
@@ -72,7 +77,7 @@ MODERN_USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.60 Safari/537.36",
 )
 
-IMPERSONATE_IDS = ("chrome110", "chrome120", "chrome124", "edge110")
+IMPERSONATE_IDS = ("chrome110", "chrome120", "chrome124", "chrome131")
 
 REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -192,33 +197,44 @@ GEMINI_API_KEY = random.choice([_gemini_config["API_KEY_RH"], _gemini_config["AP
 GEMINI_HEADERS = {"Content-Type": "application/json", "X-goog-api-key": GEMINI_API_KEY}
 GEMINI_PARAMS = {"key": GEMINI_API_KEY}
 
-MAGICBRICKS_URL = kochi_section.get("magicbricks_url", "https://www.magicbricks.com/new-projects-kochi-pppfs")
-HOUSING_URL = kochi_section.get("housing_url", "https://www.housing.com/new-projects/kochi")
-ACRES99_URL = kochi_section.get("acres99_url", "https://www.99acres.com/new-projects-in-kochi")
-COMMONFLOOR_URL = kochi_section.get("commonfloor_url", "https://www.commonfloor.com/kochi-property/new-projects")
-GOOGLE_QUERIES = [q.strip() for q in kochi_section.get("google_search_queries", "pre launch apartments kochi").split(",") if q.strip()]
-PAGES = int(kochi_section.get("pages", "20"))
-GOOGLE_PAGES = int(kochi_section.get("google_pages", "5"))
+DUCKDUCKGO_QUERIES = [q.strip() for q in kochi_section.get("duckduckgo_queries", "pre launch apartments kochi").split(",") if q.strip()]
+SIGNATURE_DWELLINGS_URL = kochi_section.get("signature_dwellings_url", "https://signaturedwellingsprojects.com/kochi/")
+PRESTIGE_PRELAUNCH_KOCHI_URL = kochi_section.get("prestige_prelaunch_kochi_url", "https://prestigeprelaunchprojects.com/kochi/")
+PRESTIGE_CITYSCAPE_URL = kochi_section.get("prestige_cityscape_url", "https://prestigeprelaunchprojects.com/kochi/prestige-cityscape-kundannoor/")
+REALESTATEINDIA_URL = kochi_section.get("realestateindia_url", "https://www.realestateindia.com/kochi-property/new-projects.htm")
+REALESTATEINDIA_LOCALITIES = [l.strip() for l in kochi_section.get("realestateindia_localities", "").split(",") if l.strip()]
+PAGES = int(kochi_section.get("pages", "10"))
+DUCKDUCKGO_PAGES = int(kochi_section.get("duckduckgo_pages", "3"))
 MIN_DELAY = float(kochi_section.get("min_delay_seconds", "2.0"))
 MAX_DELAY = float(kochi_section.get("max_delay_seconds", "6.0"))
 DETAIL_RETRY = int(kochi_section.get("detail_retry_count", "3"))
 REQUEST_TIMEOUT = int(kochi_section.get("request_timeout_seconds", "30"))
 ES_INDEX = kochi_section.get("es_index", "kochi_property_launches")
 
-es_hosts = _es_config["host"].split(",")
+es_hosts = []
+for h in _es_config["host"].split(","):
+    h = h.strip()
+    if not h:
+        continue
+    if not h.startswith("http"):
+        h = f"http://{h}"
+    if ":" not in h.split("//")[-1]:
+        h += ":9200"
+    es_hosts.append(h)
 es_user = _es_config["username"]
 es_password = _es_config["password"]
 
 
 @dataclass(slots=True)
 class KochiLaunchSettings:
-    magicbricks_url: str
-    housing_url: str
-    acres99_url: str
-    commonfloor_url: str
-    google_queries: list[str]
+    duckduckgo_queries: list[str]
+    signature_dwellings_url: str
+    prestige_prelaunch_kochi_url: str
+    prestige_cityscape_url: str
+    realestateindia_url: str
+    realestateindia_localities: list[str]
     pages: int
-    google_pages: int
+    duckduckgo_pages: int
     min_delay: float
     max_delay: float
     detail_retry: int
@@ -227,13 +243,14 @@ class KochiLaunchSettings:
 
 
 SETTINGS = KochiLaunchSettings(
-    magicbricks_url=MAGICBRICKS_URL,
-    housing_url=HOUSING_URL,
-    acres99_url=ACRES99_URL,
-    commonfloor_url=COMMONFLOOR_URL,
-    google_queries=GOOGLE_QUERIES,
+    duckduckgo_queries=DUCKDUCKGO_QUERIES,
+    signature_dwellings_url=SIGNATURE_DWELLINGS_URL,
+    prestige_prelaunch_kochi_url=PRESTIGE_PRELAUNCH_KOCHI_URL,
+    prestige_cityscape_url=PRESTIGE_CITYSCAPE_URL,
+    realestateindia_url=REALESTATEINDIA_URL,
+    realestateindia_localities=REALESTATEINDIA_LOCALITIES,
     pages=PAGES,
-    google_pages=GOOGLE_PAGES,
+    duckduckgo_pages=DUCKDUCKGO_PAGES,
     min_delay=MIN_DELAY,
     max_delay=MAX_DELAY,
     detail_retry=DETAIL_RETRY,
@@ -546,34 +563,79 @@ def _looks_like_project_url(url: str) -> bool:
     return any(ind in lower for ind in project_indicators)
 
 
-def parse_google_serp(html_text: str) -> list[dict[str, str]]:
+def _is_kochi_project(text: str, url: str = "") -> bool:
+    """Check if a project is specifically about Kochi/Kerala."""
+    lower_text = text.lower()
+    lower_url = url.lower()
+    combined = f"{lower_text} {lower_url}"
+    kochi_indicators = ["kochi", "kerala", "ernakulam", "kakkanad", "edappally", "maradu",
+                        "tripunithura", "kaloor", "panampilly", "thrikkakara", "elamkulam",
+                        "vennala", "palarivattom", "vytilla", "aluv", "angamali", "kalamasery",
+                        "kundannoor", "marine drive", "fort kochi", "mattancherry", "perumbavoor",
+                        "nedumbassery", "eroor", "thrippunithura", "kadavanthra", "vazhakkala"]
+    non_kochi_indicators = ["bangalore", "bengaluru", "mumbai", "delhi", "hyderabad", "chennai",
+                            "pune", "noida", "gurgaon", "devanahalli", "whitefield", "electronic city",
+                            "bannerghatta", "hebbal", "yelahanka", "sarjapur", "hosur road",
+                            "magadi road", "begur road", "budigere", "jigani", "kensington road",
+                            "outer ring road", "padil", "mangalore", "bidadi", "akshayanagar",
+                            "somerville", "suncrest", "waterford", "waterfront", "fernvale",
+                            "glenbrook", "greenmoor", "raintree park", "roshanara", "serenity shores",
+                            "park grove", "park ridge", "pine forest", "nandi hills", "oakville",
+                            "maple heights", "marigold", "landmark", "kings county", "eaton park",
+                            "evergreen", "falcon city", "camden", "century landmark", "county dale",
+                            "prosperity enclave", "sunset park"]
+    kochi_score = sum(2 if ind in ("kochi", "kerala", "ernakulam") else 1 for ind in kochi_indicators if ind in combined)
+    non_kochi_score = sum(1 for ind in non_kochi_indicators if ind in combined)
+    return kochi_score > non_kochi_score and kochi_score >= 1
+
+
+def _html_to_text(html_text: str) -> str:
+    """Convert HTML to plain text for extraction."""
+    text = re.sub(r"<script[^>]*>.*?</script>", "", html_text, flags=re.S)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+# =============================================================================
+# PARSERS - Individual project extraction from listing pages
+# =============================================================================
+
+def parse_duckduckgo_serp(html_text: str) -> list[dict[str, str]]:
+    """Parse DuckDuckGo HTML search results to find listing URLs."""
     results: list[dict[str, str]] = []
-    for obj in _iter_jsonld_objects(html_text):
-        if str(obj.get("@type", "")).lower() == "itemlist":
-            for item in obj.get("itemListElement", []) or []:
-                if not isinstance(item, dict):
-                    continue
-                url = item.get("url", "")
-                name = _as_text(item.get("name", ""))
-                if url and _looks_like_project_url(url):
-                    results.append({"name": name or "", "url": url, "source": "google"})
-        elif str(obj.get("@type", "")).lower() in ("webpage", "searchresultspage"):
-            pass
+    ddg_link_pattern = re.compile(r'class="result__a"[^>]+href="([^"]+)"', re.S)
+    for match in ddg_link_pattern.finditer(html_text):
+        raw_url = match.group(1)
+        if raw_url.startswith("//duckduckgo.com/l/?uddg="):
+            encoded = raw_url.split("uddg=")[1].split("&")[0]
+            url = unquote(encoded)
+        elif raw_url.startswith("http"):
+            url = raw_url
         else:
-            url = obj.get("url", "")
-            name = _as_text(obj.get("name", ""))
-            if url and _looks_like_project_url(url):
-                results.append({"name": name or "", "url": url, "source": "google"})
+            continue
+        title_match = re.search(r'class="result__a"[^>]*>(.*?)</a>', html_text[match.start():match.start()+500], re.S)
+        name = re.sub(r"<[^>]+>", "", title_match.group(1)).strip() if title_match else ""
+        if _looks_like_project_url(url) and not any(
+            skip in url.lower() for skip in ("youtube.com", "facebook.com", "twitter.com", "instagram.com", "play.google.com", "accounts.google.com", "wikipedia.org")
+        ):
+            results.append({"name": name or "", "url": url, "source": "duckduckgo"})
 
     if not results:
-        href_pattern = re.compile(r'<a[^>]+href=["\'](https?://[^"\']+)["\'][^>]*>(.*?)</a>', re.S)
-        for match in href_pattern.finditer(html_text):
-            url = match.group(1)
-            name = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+        all_hrefs = re.findall(r'href="([^"]+)"', html_text)
+        for raw_url in all_hrefs:
+            if "uddg=" in raw_url:
+                encoded = raw_url.split("uddg=")[1].split("&")[0]
+                url = unquote(encoded)
+            elif raw_url.startswith("http"):
+                url = raw_url
+            else:
+                continue
             if _looks_like_project_url(url) and not any(
-                skip in url.lower() for skip in ("google.com", "youtube.com", "facebook.com", "twitter.com", "instagram.com", "play.google.com", "accounts.google.com")
+                skip in url.lower() for skip in ("youtube.com", "facebook.com", "twitter.com", "instagram.com", "duckduckgo.com", "wikipedia.org")
             ):
-                results.append({"name": name or "", "url": url, "source": "google"})
+                results.append({"name": "", "url": url, "source": "duckduckgo"})
 
     seen = set()
     deduped = []
@@ -584,430 +646,100 @@ def parse_google_serp(html_text: str) -> list[dict[str, str]]:
     return deduped
 
 
-def parse_magicbricks_listing(html_text: str) -> list[dict[str, Any]]:
+def parse_signature_dwellings(html_text: str) -> list[dict[str, Any]]:
+    """Parse Signature Dwellings Kochi page to extract individual project URLs."""
     projects: list[dict[str, Any]] = []
-    next_data = _load_next_data(html_text)
-    if next_data:
-        try:
-            listings = (
-                next_data.get("props", {})
-                .get("pageProps", {})
-                .get("projectData", {})
-                .get("projects", [])
-            )
-            for listing in listings:
-                project = _extract_magicbricks_project(listing)
-                if project:
-                    projects.append(project)
-        except Exception as exc:
-            logger.warning("Error parsing MagicBricks __NEXT_DATA__: %s", exc)
+    link_pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.S)
+    base_url = "https://signaturedwellingsprojects.com"
 
-    if not projects:
-        try:
-            json_pattern = re.compile(r'"projects"\s*:\s*(\[.*?\])\s*,\s*"(?:totalProjects|pageData)"', re.S)
-            match = json_pattern.search(html_text)
-            if match:
-                listings = json.loads(match.group(1))
-                for listing in listings:
-                    project = _extract_magicbricks_project(listing)
-                    if project:
-                        projects.append(project)
-        except Exception as exc:
-            logger.warning("Error parsing MagicBricks inline JSON: %s", exc)
-
-    if not projects:
-        project_blocks = re.findall(
-            r'<div[^>]+class="[^"]*projdis[^"]*"[^>]*>(.*?)</div>',
-            html_text,
-            re.S,
-        )
-        for block in project_blocks[:50]:
-            name_match = re.search(r'title="([^"]+)"', block)
-            url_match = re.search(r'href="([^"]+)"', block)
-            if name_match:
-                projects.append({
-                    "project_name": name_match.group(1).strip(),
-                    "project_url": _normalize_url("https://www.magicbricks.com", url_match.group(1)) if url_match else None,
-                    "source": "magicbricks",
-                })
-
+    for match in link_pattern.finditer(html_text):
+        url = match.group(1)
+        content = match.group(2)
+        name = re.sub(r"<[^>]+>", "", content).strip()
+        if not name or len(name) < 5:
+            continue
+        if url.startswith("#") or url.startswith("javascript") or "whatsapp" in url.lower():
+            continue
+        if any(skip in url.lower() for skip in ("/property-type/", "/about", "/contact", "/privacy", "/terms", "/blog", "/sitemap")):
+            continue
+        if any(kw in name.lower() for kw in ("signature abode", "signature tropical", "signature dwelling")):
+            if url.startswith("/"):
+                url = base_url + url
+            elif not url.startswith("http"):
+                url = base_url + "/" + url
+            projects.append({
+                "project_name": name,
+                "project_url": url,
+                "source_url": url,
+                "source": "signature_dwellings",
+                "builder_name": "Signature Group",
+            })
     return projects
 
 
-def _extract_magicbricks_project(data: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(data, dict):
-        return None
-    project_name = _as_text(data.get("projectName") or data.get("name") or data.get("title"))
-    if not project_name:
-        return None
-    builder_name = _as_text(data.get("builderName") or data.get("developerName") or data.get("builder"))
-    price_text = data.get("priceRange") or data.get("price") or data.get("minPrice")
-    price_min, price_max, currency = _parse_price(price_text)
-    locality = _as_text(data.get("localityName") or data.get("locality") or data.get("location"))
-    prop_type_raw = data.get("propertyType") or data.get("projectType") or data.get("propertyTypes")
-    configs_raw = data.get("configuration") or data.get("configurations") or data.get("bhk")
-    area_raw = data.get("area") or data.get("superArea") or data.get("carpetArea") or data.get("size")
-    detail_path = data.get("projectURL") or data.get("url") or data.get("detailUrl")
-    detail_url = _normalize_url("https://www.magicbricks.com", detail_path)
-    images = _normalize_images(data.get("images") or data.get("projectImages") or data.get("image"))
-    amenities = _normalize_amenities(data.get("amenities") or data.get("projectAmenities"))
-    total_units = _maybe_int(data.get("totalUnits") or data.get("noOfUnits"))
-    possession = _as_text(data.get("possessionDate") or data.get("possession") or data.get("expectedPossession"))
-    rera = _as_text(data.get("reraNumber") or data.get("reraId") or data.get("rera"))
-    lat = _maybe_float(data.get("latitude") or data.get("lat"))
-    lng = _maybe_float(data.get("longitude") or data.get("lng"))
-
-    area_sqft = _parse_area(area_raw)
-    super_min = area_sqft if area_sqft else None
-
-    return {
-        "project_name": project_name,
-        "builder_name": builder_name,
-        "property_types": _normalize_property_types(prop_type_raw),
-        "launch_status": _classify_launch_status(data),
-        "price_min": price_min,
-        "price_max": price_max,
-        "price_currency": currency,
-        "configurations": _normalize_configurations(configs_raw),
-        "locality": locality,
-        "city": "Kochi",
-        "state": "Kerala",
-        "latitude": lat,
-        "longitude": lng,
-        "super_area_min_sqft": super_min,
-        "possession_date": possession,
-        "rera_number": rera,
-        "amenities": amenities,
-        "total_units": total_units,
-        "images": images,
-        "project_url": detail_url,
-        "source_url": detail_url,
-        "source": "magicbricks",
-    }
-
-
-def _classify_launch_status(data: dict[str, Any]) -> str:
-    status_raw = str(
-        data.get("projectStatus") or data.get("status") or data.get("launchStatus") or ""
-    ).lower()
-    if "pre" in status_raw and "launch" in status_raw:
-        return "pre-launch"
-    if "new" in status_raw and "launch" in status_raw:
-        return "new-launch"
-    if "under" in status_raw and "construct" in status_raw:
-        return "under-construction"
-    if "ready" in status_raw or "complete" in status_raw:
-        return "ready-to-move"
-    possession = str(data.get("possessionDate") or data.get("possession") or "")
-    if possession:
-        try:
-            poss_year = int(re.search(r"20\d{2}", possession).group(0))
-            current_year = datetime.now().year
-            if poss_year > current_year + 1:
-                return "pre-launch"
-            if poss_year > current_year:
-                return "under-construction"
-        except Exception:
-            pass
-    return "new-launch"
-
-
-def parse_housing_listing(html_text: str) -> list[dict[str, Any]]:
+def parse_prestige_kochi_projects(html_text: str) -> list[dict[str, Any]]:
+    """Parse Prestige Prelaunch page to extract KOCHI-ONLY project URLs."""
     projects: list[dict[str, Any]] = []
-    next_data = _load_next_data(html_text)
-    if next_data:
-        try:
-            listings = (
-                next_data.get("props", {})
-                .get("pageProps", {})
-                .get("searchResults", {})
-                .get("listings", [])
-            )
-            if not listings:
-                listings = (
-                    next_data.get("props", {})
-                    .get("pageProps", {})
-                    .get("projects", [])
-                )
-            for listing in listings:
-                project = _extract_housing_project(listing)
-                if project:
-                    projects.append(project)
-        except Exception as exc:
-            logger.warning("Error parsing Housing __NEXT_DATA__: %s", exc)
+    link_pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.S)
+    base_url = "https://prestigeprelaunchprojects.com"
 
-    if not projects:
-        try:
-            json_pattern = re.compile(r'"projects"\s*:\s*(\[.*?\])\s*[,}]', re.S)
-            match = json_pattern.search(html_text)
-            if match:
-                listings = json.loads(match.group(1))
-                for listing in listings:
-                    project = _extract_housing_project(listing)
-                    if project:
-                        projects.append(project)
-        except Exception as exc:
-            logger.warning("Error parsing Housing inline JSON: %s", exc)
-
+    for match in link_pattern.finditer(html_text):
+        url = match.group(1)
+        content = match.group(2)
+        name = re.sub(r"<[^>]+>", "", content).strip()
+        if not name or len(name) < 5:
+            continue
+        if url.startswith("/"):
+            url = base_url + url
+        elif not url.startswith("http"):
+            url = base_url + "/" + url
+        if any(skip in url.lower() for skip in ("/about", "/contact", "/privacy", "/terms", "/blog", "/sitemap", "/shopdetail")):
+            continue
+        if not _is_kochi_project(name, url):
+            continue
+        projects.append({
+            "project_name": name,
+            "project_url": url,
+            "source_url": url,
+            "source": "prestige_prelaunch",
+            "builder_name": "Prestige Group",
+        })
     return projects
 
 
-def _extract_housing_project(data: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(data, dict):
-        return None
-    project_name = _as_text(data.get("projectName") or data.get("name") or data.get("title"))
-    if not project_name:
-        return None
-    builder_name = _as_text(data.get("builderName") or data.get("developerName") or data.get("builder"))
-    price_text = data.get("priceRange") or data.get("price") or data.get("minPrice")
-    price_min, price_max, currency = _parse_price(price_text)
-    locality = _as_text(data.get("localityName") or data.get("locality") or data.get("address"))
-    prop_type_raw = data.get("propertyType") or data.get("projectType")
-    configs_raw = data.get("configuration") or data.get("bhk")
-    area_raw = data.get("area") or data.get("size")
-    detail_path = data.get("url") or data.get("detailUrl") or data.get("projectUrl")
-    detail_url = _normalize_url("https://www.housing.com", detail_path)
-    images = _normalize_images(data.get("images") or data.get("image"))
-    amenities = _normalize_amenities(data.get("amenities"))
-    total_units = _maybe_int(data.get("totalUnits"))
-    possession = _as_text(data.get("possessionDate") or data.get("possession"))
-    rera = _as_text(data.get("reraId") or data.get("reraNumber"))
-    lat = _maybe_float(data.get("lat") or data.get("latitude"))
-    lng = _maybe_float(data.get("lng") or data.get("longitude"))
-    area_sqft = _parse_area(area_raw)
-
-    return {
-        "project_name": project_name,
-        "builder_name": builder_name,
-        "property_types": _normalize_property_types(prop_type_raw),
-        "launch_status": _classify_launch_status(data),
-        "price_min": price_min,
-        "price_max": price_max,
-        "price_currency": currency,
-        "configurations": _normalize_configurations(configs_raw),
-        "locality": locality,
-        "city": "Kochi",
-        "state": "Kerala",
-        "latitude": lat,
-        "longitude": lng,
-        "super_area_min_sqft": area_sqft,
-        "possession_date": possession,
-        "rera_number": rera,
-        "amenities": amenities,
-        "total_units": total_units,
-        "images": images,
-        "project_url": detail_url,
-        "source_url": detail_url,
-        "source": "housing",
-    }
-
-
-def parse_99acres_listing(html_text: str) -> list[dict[str, Any]]:
+def parse_realestateindia_locality(html_text: str, locality: str = "") -> list[dict[str, Any]]:
+    """Parse RealEstateIndia locality page to extract individual project URLs."""
     projects: list[dict[str, Any]] = []
-    next_data = _load_next_data(html_text)
-    if next_data:
-        try:
-            for obj in _iter_objects(next_data):
-                if not isinstance(obj, list):
-                    continue
-                if len(obj) < 3:
-                    continue
-                if not all(isinstance(item, dict) for item in obj):
-                    continue
-                scores = [_score_project_dict(item) for item in obj]
-                if not scores or max(scores) < 3.0:
-                    continue
-                for item in obj:
-                    project = _extract_99acres_project(item)
-                    if project:
-                        projects.append(project)
-                break
-        except Exception as exc:
-            logger.warning("Error parsing 99acres __NEXT_DATA__: %s", exc)
+    link_pattern = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.S)
+    base_url = "https://www.realestateindia.com"
 
-    if not projects:
-        for obj in _iter_jsonld_objects(html_text):
-            if str(obj.get("@type", "")).lower() == "itemlist":
-                for item in obj.get("itemListElement", []) or []:
-                    if isinstance(item, dict):
-                        project = _extract_99acres_project(item.get("item", item))
-                        if project:
-                            projects.append(project)
-
+    for match in link_pattern.finditer(html_text):
+        url = match.group(1)
+        content = match.group(2)
+        name = re.sub(r"<[^>]+>", "", content).strip()
+        if not name or len(name) < 5:
+            continue
+        if url.startswith("/"):
+            url = base_url + url
+        elif not url.startswith("http"):
+            url = base_url + "/" + url
+        if any(skip in url.lower() for skip in ("/kochi-property/new-projects", "/property-type", "/about", "/contact")):
+            continue
+        if "new-projects" not in url.lower() and "project" not in name.lower():
+            continue
+        if locality:
+            name = f"{name} - {locality.title()}"
+        projects.append({
+            "project_name": name,
+            "project_url": url,
+            "source_url": url,
+            "source": "realestateindia",
+        })
     return projects
 
 
-def _score_project_dict(item: dict[str, Any]) -> float:
-    if not isinstance(item, dict):
-        return 0.0
-    keyset = set(item.keys())
-    score = 0.0
-    if keyset & {"projectName", "name", "title"}:
-        score += 3.0
-    if keyset & {"builderName", "developerName"}:
-        score += 2.0
-    if keyset & {"price", "priceRange", "minPrice"}:
-        score += 2.0
-    if keyset & {"propertyType", "projectType"}:
-        score += 1.0
-    if keyset & {"locality", "localityName"}:
-        score += 1.0
-    return score
-
-
-def _iter_objects(obj: Any) -> Iterable[Any]:
-    if isinstance(obj, dict):
-        yield obj
-        for value in obj.values():
-            yield from _iter_objects(value)
-    elif isinstance(obj, list):
-        yield obj
-        for item in obj:
-            yield from _iter_objects(item)
-
-
-def _extract_99acres_project(data: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(data, dict):
-        return None
-    project_name = _as_text(
-        data.get("projectName") or data.get("name") or data.get("title") or data.get("societyName")
-    )
-    if not project_name:
-        return None
-    builder_name = _as_text(data.get("builderName") or data.get("developerName") or data.get("builder"))
-    price_text = data.get("priceRange") or data.get("price") or data.get("minPrice")
-    price_min, price_max, currency = _parse_price(price_text)
-    locality = _as_text(data.get("localityName") or data.get("locality") or data.get("location"))
-    prop_type_raw = data.get("propertyType") or data.get("projectType") or data.get("propType")
-    configs_raw = data.get("configuration") or data.get("bedrooms") or data.get("bhk")
-    area_raw = data.get("area") or data.get("size") or data.get("builtUpArea") or data.get("plotArea")
-    detail_path = data.get("url") or data.get("detailUrl") or data.get("pdUrl") or data.get("seoUrl")
-    detail_url = _normalize_url("https://www.99acres.com", detail_path)
-    images = _normalize_images(data.get("images") or data.get("image") or data.get("photos"))
-    amenities = _normalize_amenities(data.get("amenities"))
-    total_units = _maybe_int(data.get("totalUnits") or data.get("noOfUnits"))
-    possession = _as_text(data.get("possessionDate") or data.get("possession") or data.get("possessionStatus"))
-    rera = _as_text(data.get("reraId") or data.get("reraNumber") or data.get("rera"))
-    lat = _maybe_float(data.get("latitude") or data.get("lat"))
-    lng = _maybe_float(data.get("longitude") or data.get("lng") or data.get("lon"))
-    area_sqft = _parse_area(area_raw)
-
-    return {
-        "project_name": project_name,
-        "builder_name": builder_name,
-        "property_types": _normalize_property_types(prop_type_raw),
-        "launch_status": _classify_launch_status(data),
-        "price_min": price_min,
-        "price_max": price_max,
-        "price_currency": currency,
-        "configurations": _normalize_configurations(configs_raw),
-        "locality": locality,
-        "city": "Kochi",
-        "state": "Kerala",
-        "latitude": lat,
-        "longitude": lng,
-        "super_area_min_sqft": area_sqft,
-        "possession_date": possession,
-        "rera_number": rera,
-        "amenities": amenities,
-        "total_units": total_units,
-        "images": images,
-        "project_url": detail_url,
-        "source_url": detail_url,
-        "source": "99acres",
-    }
-
-
-def parse_commonfloor_listing(html_text: str) -> list[dict[str, Any]]:
-    projects: list[dict[str, Any]] = []
-    next_data = _load_next_data(html_text)
-    if next_data:
-        try:
-            listings = (
-                next_data.get("props", {})
-                .get("pageProps", {})
-                .get("projects", [])
-            )
-            if not listings:
-                listings = (
-                    next_data.get("props", {})
-                    .get("pageProps", {})
-                    .get("projectList", [])
-                )
-            for listing in listings:
-                project = _extract_commonfloor_project(listing)
-                if project:
-                    projects.append(project)
-        except Exception as exc:
-            logger.warning("Error parsing CommonFloor __NEXT_DATA__: %s", exc)
-
-    if not projects:
-        try:
-            json_pattern = re.compile(r'"projects"\s*:\s*(\[.*?\])\s*[,}]', re.S)
-            match = json_pattern.search(html_text)
-            if match:
-                listings = json.loads(match.group(1))
-                for listing in listings:
-                    project = _extract_commonfloor_project(listing)
-                    if project:
-                        projects.append(project)
-        except Exception as exc:
-            logger.warning("Error parsing CommonFloor inline JSON: %s", exc)
-
-    return projects
-
-
-def _extract_commonfloor_project(data: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(data, dict):
-        return None
-    project_name = _as_text(data.get("projectName") or data.get("name") or data.get("title"))
-    if not project_name:
-        return None
-    builder_name = _as_text(data.get("builderName") or data.get("developerName") or data.get("builder"))
-    price_text = data.get("priceRange") or data.get("price") or data.get("minPrice")
-    price_min, price_max, currency = _parse_price(price_text)
-    locality = _as_text(data.get("localityName") or data.get("locality") or data.get("location"))
-    prop_type_raw = data.get("propertyType") or data.get("projectType")
-    configs_raw = data.get("configuration") or data.get("bhk")
-    area_raw = data.get("area") or data.get("size")
-    detail_path = data.get("url") or data.get("detailUrl") or data.get("projectUrl")
-    detail_url = _normalize_url("https://www.commonfloor.com", detail_path)
-    images = _normalize_images(data.get("images") or data.get("image"))
-    amenities = _normalize_amenities(data.get("amenities"))
-    total_units = _maybe_int(data.get("totalUnits"))
-    possession = _as_text(data.get("possessionDate") or data.get("possession"))
-    rera = _as_text(data.get("reraId") or data.get("reraNumber"))
-    lat = _maybe_float(data.get("lat") or data.get("latitude"))
-    lng = _maybe_float(data.get("lng") or data.get("longitude"))
-    area_sqft = _parse_area(area_raw)
-
-    return {
-        "project_name": project_name,
-        "builder_name": builder_name,
-        "property_types": _normalize_property_types(prop_type_raw),
-        "launch_status": _classify_launch_status(data),
-        "price_min": price_min,
-        "price_max": price_max,
-        "price_currency": currency,
-        "configurations": _normalize_configurations(configs_raw),
-        "locality": locality,
-        "city": "Kochi",
-        "state": "Kerala",
-        "latitude": lat,
-        "longitude": lng,
-        "super_area_min_sqft": area_sqft,
-        "possession_date": possession,
-        "rera_number": rera,
-        "amenities": amenities,
-        "total_units": total_units,
-        "images": images,
-        "project_url": detail_url,
-        "source_url": detail_url,
-        "source": "commonfloor",
-    }
-
-
-def parse_project_detail_page(html_text: str, source: str) -> dict[str, Any]:
+def parse_project_detail_page(html_text: str, source: str = "") -> dict[str, Any]:
+    """Parse a project detail page to extract structured data."""
     detail: dict[str, Any] = {}
 
     for obj in _iter_jsonld_objects(html_text):
@@ -1024,86 +756,119 @@ def parse_project_detail_page(html_text: str, source: str) -> dict[str, Any]:
             if geo:
                 detail["latitude"] = _maybe_float(geo.get("latitude"))
                 detail["longitude"] = _maybe_float(geo.get("longitude"))
+            brand = obj.get("brand")
+            if isinstance(brand, dict) and "name" in brand:
+                detail["builder_name"] = _as_text(brand.get("name"))
             break
 
-    next_data = _load_next_data(html_text)
-    if next_data:
-        best = _find_best_project_detail(next_data)
-        if best:
-            detail.update(_extract_detail_from_dict(best, source))
+    # Extract from <title> tag
+    title_match = re.search(r'<title[^>]*>(.*?)</title>', html_text, re.I | re.S)
+    if title_match and not detail.get("project_name"):
+        title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
+        title = re.sub(r"\s*\|.*$", "", title).strip()
+        if title:
+            detail["project_name"] = title
+
+    # Extract from meta description
+    desc_match = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.I | re.S)
+    if not desc_match:
+        desc_match = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']description["\']', html_text, re.I | re.S)
+    if desc_match and not detail.get("project_description"):
+        detail["project_description"] = desc_match.group(1).strip()
+
+    # Extract from og:title
+    og_title = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.I | re.S)
+    if not og_title:
+        og_title = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', html_text, re.I | re.S)
+    if og_title and not detail.get("project_name"):
+        title = og_title.group(1).strip()
+        title = re.sub(r"\s*\|.*$", "", title).strip()
+        if title:
+            detail["project_name"] = title
+
+    # Extract from og:description
+    og_desc = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.I | re.S)
+    if not og_desc:
+        og_desc = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:description["\']', html_text, re.I | re.S)
+    if og_desc and not detail.get("project_description"):
+        detail["project_description"] = og_desc.group(1).strip()
+
+    # Extract from og:image
+    og_image = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.I | re.S)
+    if not og_image:
+        og_image = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html_text, re.I | re.S)
+    if og_image:
+        img_url = og_image.group(1).strip()
+        if img_url:
+            detail["images"] = [img_url]
+
+    text = _html_to_text(html_text)
+
+    name_match = re.search(r'(?:Prestige|Signature|Asset|Sobha|Godrej|Puravankara|Brigade|SFS|Serene|Anta)\s+([A-Za-z][A-Za-z\s]+?)(?:\s+at|\s+in|\s+Kochi|\s+\||\s+-)', text, re.I)
+    if name_match and not detail.get("project_name"):
+        detail["project_name"] = name_match.group(1).strip()
+
+    if not detail.get("builder_name"):
+        builder_match = re.search(r'(?:Prestige Group|Signature Group|Signature Dwellings|Asset Homes|Sobha Limited|Godrej Properties|Puravankara Limited|Brigade Group|SFS Homes|Serene Communities|Anta Builders)', text, re.I)
+        if builder_match:
+            detail["builder_name"] = builder_match.group(0)
+
+    bhk_match = re.findall(r'(\d+)\s*BHK', text, re.I)
+    if bhk_match:
+        detail["configurations"] = [f"{b}BHK" for b in bhk_match]
+
+    price_match = re.search(r'(?:₹|Rs\.?)\s*([0-9,.]+)\s*(Cr|Lac|Lakh|K|M)?', text, re.I)
+    if price_match:
+        price_text = price_match.group(0)
+        pmin, pmax, pcur = _parse_price(price_text)
+        if pmin:
+            detail["price_min"] = pmin
+        if pmax:
+            detail["price_max"] = pmax
+
+    area_match = re.search(r'([0-9,.]+)\s*(?:sq\.?\s*ft|sqft)', text, re.I)
+    if area_match:
+        detail["super_area_min_sqft"] = _parse_area(area_match.group(0))
+
+    locality_match = re.search(r'(?:at|in|located)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),?\s*Kochi', text)
+    if locality_match:
+        detail["locality"] = locality_match.group(1).strip()
+
+    rera_match = re.search(r'RERA\s*(?:No\.?|#)?\s*([A-Za-z0-9/\-]+)', text, re.I)
+    if rera_match:
+        detail["rera_number"] = rera_match.group(1).strip()
+
+    possession_match = re.search(r'(?:possession|completion)\s*(?:date)?\s*([A-Z][a-z]+\s+\d{4})', text, re.I)
+    if possession_match:
+        detail["possession_date"] = possession_match.group(1).strip()
+
+    launch_match = re.search(r'(pre-launch|new-launch|under-construction|ready-to-move|upcoming)', text, re.I)
+    if launch_match:
+        detail["launch_status"] = launch_match.group(1).lower()
+
+    type_match = re.search(r'TYPE\s*:\s*([A-Za-z\s]+?)(?:\s+Price|$)', text, re.I)
+    if type_match:
+        detail["property_types"] = _normalize_property_types(type_match.group(1))
+
+    config_match = re.search(r'Configurations\s*:\s*([^\n]+)', text, re.I)
+    if config_match and not detail.get("configurations"):
+        detail["configurations"] = _normalize_configurations(config_match.group(1))
+
+    if not detail.get("project_description"):
+        desc_match = re.search(r'(?:about|description)[\s:]+([^.]{50,300})', text, re.I)
+        if desc_match:
+            detail["project_description"] = desc_match.group(1).strip()
+
+    amenities_section = re.search(r'(?:amenities|facilities)[\s:]+([^.]{50,500})', text, re.I)
+    if amenities_section:
+        detail["amenities"] = _normalize_amenities(amenities_section.group(1))
 
     return {key: value for key, value in detail.items() if value not in (None, [], "")}
 
 
-def _find_best_project_detail(payload: dict[str, Any]) -> dict[str, Any] | None:
-    best = None
-    best_score = 0.0
-    for obj in _iter_objects(payload):
-        if not isinstance(obj, dict):
-            continue
-        score = 0.0
-        for key in ("description", "amenities", "features", "projectName", "builderName"):
-            if key in obj:
-                score += 1.0
-        for key in ("price", "priceRange", "images", "gallery"):
-            if key in obj:
-                score += 1.0
-        for key in ("bedrooms", "bathrooms", "area", "possessionDate"):
-            if key in obj:
-                score += 0.5
-        if score > best_score:
-            best_score = score
-            best = obj
-    return best
-
-
-def _extract_detail_from_dict(data: dict[str, Any], source: str) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    if data.get("projectName") or data.get("name"):
-        result["project_name"] = _as_text(data.get("projectName") or data.get("name"))
-    if data.get("builderName") or data.get("developerName") or data.get("builder"):
-        result["builder_name"] = _as_text(data.get("builderName") or data.get("developerName") or data.get("builder"))
-    if data.get("description"):
-        result["project_description"] = _as_text(data.get("description"))
-    if data.get("amenities"):
-        result["amenities"] = _normalize_amenities(data.get("amenities"))
-    if data.get("highlights"):
-        result["project_highlights"] = _normalize_amenities(data.get("highlights"))
-    price_text = data.get("priceRange") or data.get("price")
-    if price_text:
-        pmin, pmax, pcur = _parse_price(price_text)
-        if pmin:
-            result["price_min"] = pmin
-        if pmax:
-            result["price_max"] = pmax
-        if pcur:
-            result["price_currency"] = pcur
-    if data.get("possessionDate") or data.get("possession"):
-        result["possession_date"] = _as_text(data.get("possessionDate") or data.get("possession"))
-    if data.get("reraId") or data.get("reraNumber") or data.get("rera"):
-        result["rera_number"] = _as_text(data.get("reraId") or data.get("reraNumber") or data.get("rera"))
-    if data.get("totalUnits"):
-        result["total_units"] = _maybe_int(data.get("totalUnits"))
-    if data.get("propertyType") or data.get("projectType"):
-        result["property_types"] = _normalize_property_types(data.get("propertyType") or data.get("projectType"))
-    if data.get("configuration") or data.get("bhk"):
-        result["configurations"] = _normalize_configurations(data.get("configuration") or data.get("bhk"))
-    if data.get("area") or data.get("size"):
-        area = _parse_area(data.get("area") or data.get("size"))
-        if area:
-            result["super_area_min_sqft"] = area
-    if data.get("latitude") or data.get("lat"):
-        result["latitude"] = _maybe_float(data.get("latitude") or data.get("lat"))
-    if data.get("longitude") or data.get("lng") or data.get("lon"):
-        result["longitude"] = _maybe_float(data.get("longitude") or data.get("lng") or data.get("lon"))
-    if data.get("localityName") or data.get("locality"):
-        result["locality"] = _as_text(data.get("localityName") or data.get("locality"))
-    if data.get("images") or data.get("image"):
-        images = _normalize_images(data.get("images") or data.get("image"))
-        if images:
-            result["images"] = images
-    return result
-
+# =============================================================================
+# AI EXTRACTION
+# =============================================================================
 
 def _strip_bom_and_fences(s: str) -> str:
     s = s.lstrip("\ufeff").strip()
@@ -1280,6 +1045,10 @@ def ai_classify_builder(builder_name: str, project_details: dict[str, Any]) -> s
     return "mid-segment"
 
 
+# =============================================================================
+# NORMALIZATION & DEDUPLICATION
+# =============================================================================
+
 def normalize_project_record(raw: dict[str, Any], discovered_at: str | None = None) -> dict[str, Any]:
     project_name = _as_text(raw.get("project_name", ""))
     builder_name = _as_text(raw.get("builder_name", "")) or "Unknown"
@@ -1367,21 +1136,9 @@ def deduplicate_projects(projects: list[dict[str, Any]]) -> list[dict[str, Any]]
     return list(by_id.values())
 
 
-def es_client() -> Elasticsearch:
-    es = Elasticsearch(
-        hosts=es_hosts,
-        http_auth=(es_user, es_password),
-        timeout=30,
-        max_retries=3,
-        retry_on_timeout=True,
-    )
-    try:
-        info = es.info()
-        logger.info("Connected to ES cluster=%s", info.get("cluster_name", "unknown"))
-    except Exception as exc:
-        logger.warning("Failed to fetch ES info: %s", exc)
-    return es
-
+# =============================================================================
+# ELASTICSEARCH
+# =============================================================================
 
 ES_INDEX_MAPPING = {
     "settings": {
@@ -1422,6 +1179,22 @@ ES_INDEX_MAPPING = {
         },
     },
 }
+
+
+def es_client() -> Elasticsearch:
+    es = Elasticsearch(
+        hosts=es_hosts,
+        http_auth=(es_user, es_password),
+        timeout=30,
+        max_retries=3,
+        retry_on_timeout=True,
+    )
+    try:
+        info = es.info()
+        logger.info("Connected to ES cluster=%s", info.get("cluster_name", "unknown"))
+    except Exception as exc:
+        logger.warning("Failed to fetch ES info: %s", exc)
+    return es
 
 
 def ensure_index(es: Elasticsearch, index: str) -> None:
@@ -1486,6 +1259,10 @@ def index_projects_to_es(projects: list[dict[str, Any]], es: Elasticsearch | Non
     return indexed
 
 
+# =============================================================================
+# PIPELINE TASKS
+# =============================================================================
+
 async def _fetch_detail_with_retry(session, url: str | None, use_curl_cffi: bool) -> dict[str, Any]:
     if not url:
         return {}
@@ -1501,81 +1278,111 @@ async def _fetch_detail_with_retry(session, url: str | None, use_curl_cffi: bool
     return {}
 
 
-def _page_text_to_ai_input(html_text: str) -> str:
-    text = re.sub(r"<script[^>]*>.*?</script>", "", html_text, flags=re.S)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:8000]
-
-
 class InputParams(BaseModel):
     pass
 
 
 @task
 async def discover_kochi_projects(params: InputParams = None) -> list[dict[str, Any]]:
+    """Two-level discovery:
+    Level 1: Find listing pages via DuckDuckGo + portal homepages
+    Level 2: Visit listing pages to extract individual project URLs
+    """
     session, use_curl = _build_http_client()
     discovered: list[dict[str, Any]] = []
     now = _to_iso_now()
+    seen_urls: set[str] = set()
+    listing_urls_to_visit: list[str] = []
 
-    for query in SETTINGS.google_queries:
-        for page in range(SETTINGS.google_pages):
-            start = page * 10
-            url = f"https://www.google.com/search?q={quote_plus(query)}&start={start}"
-            logger.info("Google search: %s (page %d)", query, page + 1)
+    def add_project(proj: dict[str, Any]):
+        url = proj.get("project_url", "")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            proj["discovered_at"] = now
+            discovered.append(proj)
+
+    def add_listing_url(url: str):
+        if url and url not in seen_urls and url not in listing_urls_to_visit:
+            listing_urls_to_visit.append(url)
+            seen_urls.add(url)
+
+    # --- Level 1: DuckDuckGo search for listing pages (NOT individual projects) ---
+    for query in SETTINGS.duckduckgo_queries:
+        for page in range(SETTINGS.duckduckgo_pages):
+            offset = page * 10
+            url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}&s={offset}"
+            logger.info("DuckDuckGo search: %s (page %d)", query, page + 1)
             try:
                 html_text = _fetch(session, url, retries=2, use_curl_cffi=use_curl)
-                results = parse_google_serp(html_text)
+                results = parse_duckduckgo_serp(html_text)
                 for r in results:
-                    discovered.append({
-                        "project_name": r.get("name", ""),
-                        "project_url": r["url"],
-                        "source_url": r["url"],
-                        "source": "google",
-                        "discovered_at": now,
-                    })
-                logger.info("Found %d Google results for '%s' page %d", len(results), query, page + 1)
+                    add_listing_url(r["url"])
+                logger.info("Found %d DuckDuckGo listing URLs for '%s' page %d", len(results), query, page + 1)
             except Exception as exc:
-                logger.warning("Google search failed for '%s' page %d: %s", query, page + 1, exc)
+                logger.warning("DuckDuckGo search failed for '%s' page %d: %s", query, page + 1, exc)
             await asyncio.sleep(random.uniform(SETTINGS.min_delay, SETTINGS.max_delay))
 
+    # --- Level 1: Visit portal homepages for individual project URLs ---
     portal_configs = [
-        ("magicbricks", SETTINGS.magicbricks_url, parse_magicbricks_listing),
-        ("housing", SETTINGS.housing_url, parse_housing_listing),
-        ("99acres", SETTINGS.acres99_url, parse_99acres_listing),
-        ("commonfloor", SETTINGS.commonfloor_url, parse_commonfloor_listing),
+        ("signature_dwellings", SETTINGS.signature_dwellings_url, parse_signature_dwellings),
+        ("prestige_prelaunch", SETTINGS.prestige_prelaunch_kochi_url, parse_prestige_kochi_projects),
     ]
     for portal_name, base_url, parser in portal_configs:
-        logger.info("Scraping portal: %s", portal_name)
+        if not base_url:
+            continue
+        logger.info("Scraping portal homepage: %s", portal_name)
         try:
             html_text = _fetch(session, base_url, retries=2, use_curl_cffi=use_curl)
             projects = parser(html_text)
-            for project in projects:
-                project["discovered_at"] = now
-            discovered.extend(projects)
-            logger.info("Found %d projects from %s", len(projects), portal_name)
+            for p in projects:
+                add_project(p)
+            logger.info("Found %d projects from %s homepage", len(projects), portal_name)
+        except Exception as exc:
+            logger.warning("Failed to scrape %s homepage: %s", portal_name, exc)
 
-            for page in range(2, SETTINGS.pages + 1):
-                page_url = f"{base_url}?page={page}" if "?" not in base_url else f"{base_url}&page={page}"
+    # --- Level 1: Visit RealEstateIndia locality pages for individual project URLs ---
+    if SETTINGS.realestateindia_url:
+        logger.info("Scraping RealEstateIndia main page")
+        try:
+            html_text = _fetch(session, SETTINGS.realestateindia_url, retries=2, use_curl_cffi=use_curl)
+            locality_links = re.findall(r'href=["\'](/kochi-property/new-projects-in-[^"\']+)["\']', html_text)
+            for locality_path in locality_links[:10]:
+                locality_url = f"https://www.realestateindia.com{locality_path}"
+                locality_name = locality_path.split("-")[-1].replace(".htm", "")
+                logger.info("Scraping locality: %s", locality_name)
                 try:
-                    html_text = _fetch(session, page_url, retries=1, use_curl_cffi=use_curl)
-                    projects = parser(html_text)
-                    if not projects:
-                        logger.info("No more projects from %s page %d, stopping.", portal_name, page)
-                        break
-                    for project in projects:
-                        project["discovered_at"] = now
-                    discovered.extend(projects)
-                    logger.info("Found %d projects from %s page %d", len(projects), portal_name, page)
+                    html_text = _fetch(session, locality_url, retries=1, use_curl_cffi=use_curl)
+                    projects = parse_realestateindia_locality(html_text, locality=locality_name)
+                    for p in projects:
+                        add_project(p)
+                    logger.info("Found %d projects from %s", len(projects), locality_name)
                 except Exception as exc:
-                    logger.warning("Failed to fetch %s page %d: %s", portal_name, page, exc)
-                    break
+                    logger.warning("Failed to scrape locality %s: %s", locality_name, exc)
                 await asyncio.sleep(random.uniform(SETTINGS.min_delay, SETTINGS.max_delay))
         except Exception as exc:
-            logger.warning("Failed to scrape %s: %s", portal_name, exc)
+            logger.warning("Failed to scrape RealEstateIndia: %s", exc)
 
-    logger.info("Total discovered: %d raw project entries", len(discovered))
+    # --- Level 2: Visit DuckDuckGo-discovered listing pages to extract individual projects ---
+    for listing_url in listing_urls_to_visit[:15]:
+        logger.info("Visiting listing page: %s", listing_url)
+        try:
+            html_text = _fetch(session, listing_url, retries=1, use_curl_cffi=use_curl)
+            text = _html_to_text(html_text)
+            links = re.findall(r'href=["\']([^"\']+)["\']', html_text)
+            for link in links:
+                if link.startswith("http") and _looks_like_project_url(link) and link not in seen_urls:
+                    if _is_kochi_project(text, link):
+                        add_project({
+                            "project_name": "",
+                            "project_url": link,
+                            "source_url": link,
+                            "source": "discovered_listing",
+                        })
+        except Exception as exc:
+            logger.warning("Failed to visit listing page %s: %s", listing_url, exc)
+        await asyncio.sleep(random.uniform(SETTINGS.min_delay, SETTINGS.max_delay))
+
+    logger.info("Total discovered: %d individual project entries", len(discovered))
     out_dir = Path("saved_data/kochi_launches")
     out_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(discovered)
@@ -1585,6 +1392,7 @@ async def discover_kochi_projects(params: InputParams = None) -> list[dict[str, 
 
 @task
 async def enrich_project_details(discovered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Visit each project detail page, extract structured data, normalize to schema."""
     session, use_curl = _build_http_client()
     enriched: list[dict[str, Any]] = []
 
@@ -1592,7 +1400,7 @@ async def enrich_project_details(discovered: list[dict[str, Any]]) -> list[dict[
         project_name = project.get("project_name", "")
         detail_url = project.get("project_url") or project.get("source_url")
         source = project.get("source", "unknown")
-        logger.info("Enriching project %d/%d: %s (%s)", i + 1, len(discovered), project_name, source)
+        logger.info("Enriching project %d/%d: %s (%s)", i + 1, len(discovered), project_name or "(unnamed)", source)
 
         if detail_url:
             try:
@@ -1605,7 +1413,7 @@ async def enrich_project_details(discovered: list[dict[str, Any]]) -> list[dict[
                 needs_ai = not project.get("builder_name") or not project.get("configurations") or not project.get("property_types")
                 if needs_ai or not project.get("project_description"):
                     try:
-                        page_text = _page_text_to_ai_input(html_text)
+                        page_text = _html_to_text(html_text)
                         if page_text:
                             ai_result = ai_extract_project(page_text)
                             for key, value in ai_result.items():
@@ -1697,8 +1505,8 @@ async def ai_classify_builders() -> int:
 
 register_pipeline(
     id="kochi_launches_pipeline",
-    description="Discover, enrich, classify and index pre-launch & new-launch property projects in Kochi, Kerala into Elasticsearch.",
-    tasks=[discover_kochi_projects, enrich_project_details, standardize_and_index, ai_classify_builders],
+    description="Discover, enrich and index pre-launch & new-launch property projects in Kochi, Kerala into Elasticsearch.",
+    tasks=[discover_kochi_projects, enrich_project_details, standardize_and_index],
     triggers=[
         Trigger(
             id="kochi_launches_daily",

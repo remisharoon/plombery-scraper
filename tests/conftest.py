@@ -31,6 +31,16 @@ def google_serp_html():
 
 
 @pytest.fixture
+def prestige_prelaunch_html():
+    return (FIXTURES_DIR / "prestige_prelaunch_listing.html").read_text()
+
+
+@pytest.fixture
+def signature_dwellings_html():
+    return (FIXTURES_DIR / "signature_dwellings_listing.html").read_text()
+
+
+@pytest.fixture
 def project_detail_html():
     return (FIXTURES_DIR / "project_detail_page.html").read_text()
 
